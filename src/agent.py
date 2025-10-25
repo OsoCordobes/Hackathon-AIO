@@ -1,122 +1,144 @@
-# src/agent.py
-import os, re, json
-from typing import Any, Dict
+import os
+import re
+from typing import Any, List, Optional, Dict
+
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool
+
 from src.agent_tools import (
-    recommend_action_missing_sku,
-    impacted_orders_by_component,
-    reroute_block,
-    predict_coverage,
-    handle_plant_down,
+    delayed_orders_md,
+    plan_missing_sku_md,
+    impacted_by_plant_md,
+    order_details_md,
+    plan_all_delayed_orders_md,
 )
 
-# ---------- IO coercion ----------
-def _to_text(x) -> str:
-    if isinstance(x, str):
-        return x
-    if isinstance(x, dict):
-        for k in ("text", "message", "query", "input", "prompt"):
-            v = x.get(k)
-            if isinstance(v, str):
-                return v
-        return " ".join(str(v) for v in x.values())
-    return str(x)
-
-# ---------- optional LLM ----------
-USE_LLM = bool(os.getenv("OPENAI_API_KEY"))
-LLM = None
-if USE_LLM:
-    try:
-        from langchain_openai import ChatOpenAI
-        LLM = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), temperature=0.2)
-    except Exception:
-        USE_LLM = False
-
-SYSTEM_PROMPT = (
-    "You are a supply-chain assistant. Detect intent (missing_sku, missing_component, "
-    "reroute, coverage, unknown). Extract sku/component and quantity. "
-    "Return ONLY JSON: {\"intent\":..., \"sku\":..., \"component\":..., \"quantity\":...}"
+SYS = (
+    "You are Jarvis, a helpful supply-chain assistant.\n"
+    "• If the user asks for facts about orders/inventory/plants, call TOOLS and answer from CSV outputs.\n"
+    "• If the message is greeting or small talk, reply naturally yourself.\n"
+    "• Never invent data. When facts are needed, use a TOOL.\n\n"
+    "TOOLS:\n"
+    " - delayed_orders() -> delayed orders from orders.csv\n"
+    " - plan_missing_sku(sku:str) -> recovery plan for a SKU using CSVs\n"
+    " - impacted_by_plant(plant_id:str) -> orders at a plant using CSVs\n"
+    " - order_details(order_id:str) -> order info from CSVs\n"
+    " - plan_all_delayed_orders() -> plan for all delayed orders\n"
+    "Use IDs like product_####, order_####, plant_### when applicable."
 )
 
-# ---------- parsers ----------
-def _regex_parse(x: Any) -> Dict[str, Any]:
-    t = _to_text(x).strip()
-    sku = None; comp = None; qty = None
-    m = re.search(r"(?:product|sku)_[A-Za-z0-9\-]+", t, re.I)
-    if m: sku = m.group(0)
-    m = re.search(r"(?:component|cmp)_[A-Za-z0-9\-]+", t, re.I)
-    if m: comp = m.group(0)
-    m = re.search(r"(\d+)\s*(units|pcs|qty)?", t, re.I)
-    if m:
-        try: qty = int(m.group(1))
-        except: qty = None
-    intent = "unknown"
-    low = t.lower()
-    if any(k in low for k in ["missing", "stockout", "unavailable"]):
-        intent = "missing_component" if comp and not sku else "missing_sku"
-    elif "reroute" in low: intent = "reroute"
-    elif "coverage" in low or "how long" in low: intent = "coverage"
-    return {"intent": intent, "sku": sku, "component": comp, "quantity": qty}
+@tool
+def delayed_orders() -> str:
+    """Return delayed orders from CSV."""
+    return delayed_orders_md()
 
-def _llm_parse(x: Any) -> Dict[str, Any]:
-    if not USE_LLM or LLM is None:
-        return _regex_parse(x)
-    try:
-        text = _to_text(x)
-        out = LLM.invoke([
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ]).content
-        j = re.search(r"\{.*\}", out, re.S)
-        return json.loads(j.group(0)) if j else _regex_parse(text)
-    except Exception:
-        return _regex_parse(x)
+@tool
+def plan_missing_sku(sku: str) -> str:
+    """Plan recovery for a missing SKU. Example sku: product_556490."""
+    return plan_missing_sku_md(sku)
 
-def _parse(x: Any) -> Dict[str, Any]:
-    return _llm_parse(x)
+@tool
+def impacted_by_plant(plant_id: str) -> str:
+    """Orders impacted at a plant. Example: plant_253 or numeric id."""
+    return impacted_by_plant_md(plant_id)
 
-# ---------- agent ----------
-class SmartAgent:
-    def _wrap(self, text: str, suggestions=None) -> dict:
-        return {"text": text, "suggestions": suggestions or []}
+@tool
+def order_details(order_id: str) -> str:
+    """Details for a specific order. Accepts order_311579 or numeric id."""
+    return order_details_md(order_id)
 
-    def invoke(self, payload: Any) -> dict:
-        p = _parse(payload)
-        intent = p.get("intent", "unknown")
-        sku = p.get("sku")
-        comp = p.get("component")
-        qty = p.get("quantity") or 50
+@tool
+def plan_all_delayed_orders() -> str:
+    """Plan recovery across all delayed orders using CSVs."""
+    return plan_all_delayed_orders_md()
 
-        # detect plant outage phrasing
-        msg = _to_text(payload).strip()
-        mplant = re.search(r"(?:plant|site|wh)_[A-Za-z0-9\-]+", msg, re.I)
-        plant_id = mplant.group(0) if mplant else None
-        if plant_id and any(k in msg.lower() for k in ["down","not working","outage","offline","closed"]):
-            return handle_plant_down(plant_id)
+TOOLS = [delayed_orders, plan_missing_sku, impacted_by_plant, order_details, plan_all_delayed_orders]
 
-        if intent == "missing_sku" and sku:
-            return self._wrap(
-                recommend_action_missing_sku(f"{sku} is missing"),
-                [f"Try alternative plant for {sku}", f"Export plan for {sku}"],
-            )
+class LlmCsvAgent:
+    def __init__(self, model: Optional[str] = None, temperature: float = 0.1, max_steps: int = 6):
+        self.llm = ChatOpenAI(
+            model=model or os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            temperature=temperature,
+        ).bind_tools(TOOLS)
+        self.max_steps = max_steps
 
-        if intent == "missing_component" and comp:
-            n = len(impacted_orders_by_component(comp))
-            return self._wrap(
-                f"Component {comp} shortage detected. {n} impacted order(s) estimated. Provide parent SKU to plan recovery.",
-                [f"Plan recovery for parent of {comp}", f"Show orders using {comp}"],
-            )
+    def _guess(self, pattern: str, text: str) -> Optional[str]:
+        m = re.search(pattern, text, re.I)
+        if not m:
+            return None
+        g = m.group(0)
+        # normalize order id like plain digits -> order_#####
+        if "order" not in g.lower():
+            if re.fullmatch(r"\d{5,}", g):
+                return f"order_{g}"
+        return g
 
-        if intent == "reroute":
-            return self._wrap(str(reroute_block(payload)))
+    def _ctx_text(self, messages: List[Any]) -> str:
+        return " ".join(getattr(m, "content", "") or "" for m in messages)
 
-        if intent == "coverage":
-            return self._wrap(str(predict_coverage(payload)))
+    def _loop(self, messages: List[Any]) -> str:
+        for _ in range(self.max_steps):
+            ai = self.llm.invoke(messages)
+            messages.append(ai)
 
-        # small talk fallback
-        return self._wrap(
-            f"I’m online. Example: 'product_556490 is missing' or 'plant_253 is not working'. You said: '{msg}'.",
-            ["product_556490 is missing", "plant_253 is not working"],
-        )
+            if not ai.tool_calls:
+                return ai.content  # natural reply
+
+            ctx = self._ctx_text(messages)
+
+            for call in ai.tool_calls:
+                name = call["name"]
+                args = call.get("args") or {}
+
+                try:
+                    if name == "delayed_orders":
+                        result = delayed_orders()
+
+                    elif name == "plan_missing_sku":
+                        sku = args.get("sku") or self._guess(r"(?:product|sku)_[A-Za-z0-9\-]+", ctx)
+                        result = plan_missing_sku(sku) if sku else "Please provide a SKU like product_556490."
+
+                    elif name == "impacted_by_plant":
+                        pid = args.get("plant_id") or self._guess(r"(?:plant|site|wh)_[A-Za-z0-9\-]+|\b\d{2,}\b", ctx)
+                        result = impacted_by_plant(pid) if pid else "Please provide a plant id like plant_253."
+
+                    elif name == "order_details":
+                        oid = args.get("order_id") or self._guess(r"(?:order|so|id)[ _-]?(\d+)|\b\d{5,}\b", ctx)
+                        if oid and not oid.lower().startswith("order_"):
+                            m = re.search(r"\d+", oid)
+                            oid = f"order_{m.group(0)}" if m else None
+                        result = order_details(oid) if oid else "Please provide an order id like order_311579."
+
+                    elif name == "plan_all_delayed_orders":
+                        result = plan_all_delayed_orders()
+
+                    else:
+                        result = "Tool not available."
+                except Exception as e:
+                    result = f"Tool error: {type(e).__name__}: {e}"
+
+                messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+
+        return "I could not complete the request. Please rephrase."
+
+    def invoke(self, payload: Any) -> Dict[str, Any]:
+        user_text = payload if isinstance(payload, str) else str(payload)
+        msgs: List[Any] = [SystemMessage(content=SYS), HumanMessage(content=user_text)]
+        answer = self._loop(msgs)
+        return {
+            "text": answer,
+            "suggestions": [
+                "Which orders are delayed?",
+                "Plan recovery for all delayed orders",
+                "product_556490 is missing",
+                "Show order 311579 details",
+                "plant_253 is not working",
+            ],
+        }
 
 def build_agent():
-    return SmartAgent()
+    agent = LlmCsvAgent()
+    print(f"[Jarvis] LLM ready: {os.getenv('OPENAI_MODEL','gpt-4o-mini')}")
+    return agent
+

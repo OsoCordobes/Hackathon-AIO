@@ -8,6 +8,8 @@ app = Flask(__name__, static_folder="static", template_folder="templates")
 AGENT = build_agent()
 
 def _safe_text(payload):
+    print("[Server] Agent instance:", type(AGENT).__name__)
+
     if isinstance(payload, str):
         return payload
     if isinstance(payload, dict):

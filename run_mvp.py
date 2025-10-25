@@ -1,31 +1,25 @@
-from src.load_data import load_inventory, load_orders, load_plants, load_plant_material
-from src.planner import plan_recovery
+# run_mvp.py
+import argparse, json
+from pathlib import Path
+from src.advisor import plan_recovery
 
-# --- Load data
-inv = load_inventory("data/inventory.csv")
-plants = load_plants("data/plants.csv")
-orders = load_orders("data/orders.csv")
-plant_material = load_plant_material("data/plant_material.csv")
+def main():
+    ap = argparse.ArgumentParser(description="Danfoss MVP advisor 100% basado en CSV")
+    ap.add_argument("--data-dir", required=True, help="Carpeta con inventory.csv, material_component_small.csv, orders.csv, plant_material.csv, plants.csv")
+    ap.add_argument("--missing-product", required=True)
+    ap.add_argument("--missing-qty", type=int, required=True)
+    ap.add_argument("--origin-plant", required=True)
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
 
-# --- Simulate delay event
-delay = {
-    "shipment_id": "S100",
-    "sku": "product_556490",
-    "qty_unavailable": 50,
-    "origin": "Plant_A"
-}
+    out = plan_recovery(
+        data_dir=Path(args.data_dir),
+        missing_product=args.missing_product,
+        missing_qty=args.missing_qty,
+        origin_plant=args.origin_plant,
+        verbose=args.verbose
+    )
+    print(json.dumps(out, ensure_ascii=False, indent=2))
 
-# --- Run recovery plan
-plans, kpi = plan_recovery(
-    delay_event=delay,
-    inventory=inv,
-    plants=plants,
-    orders=orders,
-    plant_material=plant_material
-)
-
-# --- Output results
-print("Recovery plan:")
-print(plans)
-print("\nKPI summary:")
-print(kpi)
+if __name__ == "__main__":
+    main()
