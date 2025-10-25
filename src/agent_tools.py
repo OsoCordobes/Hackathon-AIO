@@ -56,9 +56,18 @@ def recommend_action_missing_sku(input_text) -> str:
     orders = load_orders("data/orders.csv")
     plant_material = load_plant_material("data/plant_material.csv")
 
-    delay_event = {"shipment_id": f"S_{sku}", "sku": sku, "qty_unavailable": 50, "origin": "PLANT_A"}
-    plans, kpi = plan_for_delay(delay_event, inv, plants, orders, plant_material)
-    return _fmt_plan(sku, plans, kpi)
+ # pick real source plant from inventory for this SKU
+    stock_rows = inv.copy()
+    stock_rows.columns = [c.lower() for c in stock_rows.columns]
+    sku_col = next(c for c in ("sku","product","material","product_id") if c in stock_rows.columns)
+    plant_col = next(c for c in ("plant_id","location_id","warehouse_id","site","plant") if c in stock_rows.columns)
+    qty_col = next(c for c in ("stock","available_qty","qty","quantity","on_hand","balance","current_level") if c in stock_rows.columns)
+    
+    rows = stock_rows[stock_rows[sku_col].astype(str) == str(sku)]
+    origin = rows.sort_values(qty_col, ascending=False)[plant_col].iloc[0] if not rows.empty else "unknown"
+    
+    delay_event = {"shipment_id": f"S_{sku}", "sku": sku, "qty_unavailable": 50, "origin": origin}
+
 
 def impacted_orders_by_sku(sku: str):
     orders = load_orders("data/orders.csv")
