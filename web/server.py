@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 from src.agent import build_agent
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -18,7 +18,11 @@ def _safe_text(payload):
     return str(payload)
 
 @app.get("/")
-def index():
+def landing():
+    return render_template("orb.html")
+
+@app.get("/chat")
+def chat_page():
     return render_template("index.html")
 
 @app.post("/chat")
