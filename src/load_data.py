@@ -99,7 +99,8 @@ def load_orders(path: str) -> pd.DataFrame:
         if mask.any():
             out.loc[mask, "need_by_ts_utc"] = pd.Timestamp.utcnow().tz_localize("UTC") + pd.Timedelta(hours=24)
     else:
-        out["need_by_ts_utc"] = pd.Timestamp.utcnow().tz_localize("UTC") + pd.Timedelta(hours=24)
+       out["need_by_ts_utc"] = pd.Timestamp.utcnow() + pd.Timedelta(hours=24)
+
 
     return out
 

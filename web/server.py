@@ -1,40 +1,38 @@
-# web/server.py
-from pathlib import Path
-import os
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
+load_dotenv()
 
+from flask import Flask, request, jsonify, render_template
 from src.agent import build_agent
 
-ROOT = Path(__file__).resolve().parent
-app = FastAPI()
-
-# mount /static only if present
-static_dir = ROOT / "static"
-if static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
+app = Flask(__name__, static_folder="static", template_folder="templates")
 AGENT = build_agent()
-INDEX_HTML = (ROOT / "index.html").read_text(encoding="utf-8")
 
-@app.get("/", response_class=HTMLResponse)
+def _safe_text(payload):
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        for k in ("text", "message", "query", "input", "prompt"):
+            v = payload.get(k)
+            if isinstance(v, str):
+                return v
+    return str(payload)
+
+@app.get("/")
 def index():
-    return HTMLResponse(INDEX_HTML)
+    return render_template("index.html")
 
 @app.post("/chat")
-async def chat(req: Request):
-    data = await req.json()
-    msg = str(data.get("message", "")).strip()
-    if not msg:
-        return JSONResponse({"reply": "Please type a message."})
-    try:
-        out = AGENT.invoke({"input": msg})
-        reply = out.get("output", str(out))
-        return JSONResponse({"reply": reply})
-    except Exception as e:
-        return JSONResponse({"reply": f"Error: {e}"}, status_code=500)
+def chat():
+    data = request.get_json(silent=True) or {}
+    text = _safe_text(data)
+    res = AGENT.invoke(text if text else data)
+    if isinstance(res, str):
+        res = {"text": res, "suggestions": []}
+    return jsonify(res)
+
+@app.get("/health")
+def health():
+    return jsonify({"ok": True})
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("web.server:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
+    app.run(host="0.0.0.0", port=8000, debug=False)
