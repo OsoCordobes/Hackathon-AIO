@@ -63,29 +63,45 @@ def load_plants(path: str) -> pd.DataFrame:
 def load_orders(path: str) -> pd.DataFrame:
     """
     -> columns: order_id, customer_id, sku, qty, dest_loc_id, need_by_ts_utc (tz-aware)
+    Falls back gracefully if qty or due date are missing.
     """
     df = _norm_cols(pd.read_csv(path))
 
-    oid = _pick(df.columns, "order_id","order","id")
-    cust = _pick(df.columns, "customer_id","customer","client_id","client")
+    oid = _pick(df.columns, "order_id","order","order_key","id")
+    cust = _pick(df.columns, "customer_id","customer","client_id","client","sold_to_party")
     sku  = _pick(df.columns, "sku","material","product","item","product_id","material_id","item_id")
-    qty  = _pick(df.columns, "qty","quantity","order_qty","units")
+    qty  = _pick(df.columns, "qty","quantity","order_qty","units")     # may be None
     dest = _pick(df.columns, "dest_loc_id","destination","plant","ship_to","shipto","location_id","loc_id")
-    due  = _pick(df.columns, "need_by_ts_utc","need_by","need_by_date","promise_date","due","due_ts","eta")
+    due  = _pick(df.columns, "need_by_ts_utc","need_by","need_by_date","promise_date","due","due_ts","eta")  # may be None
 
-    missing = [k for k,v in {"order_id":oid,"customer_id":cust,"sku":sku,"qty":qty,"dest_loc_id":dest,"need_by_ts_utc":due}.items() if v is None]
-    if missing:
-        raise ValueError(f"orders: missing {missing}. got {list(df.columns)}")
+    missing_core = [k for k,v in {"order_id":oid,"customer_id":cust,"sku":sku,"dest_loc_id":dest}.items() if v is None]
+    if missing_core:
+        raise ValueError(f"orders: missing required {missing_core}. got {list(df.columns)}")
 
-    out = df[[oid,cust,sku,qty,dest,due]].copy()
-    out.columns = ["order_id","customer_id","sku","qty","dest_loc_id","need_by_ts_utc"]
+    out = df[[oid,cust,sku,dest]].copy()
+    out.columns = ["order_id","customer_id","sku","dest_loc_id"]
     out["order_id"] = out["order_id"].astype(str)
     out["customer_id"] = out["customer_id"].astype(str)
     out["sku"] = out["sku"].astype(str)
     out["dest_loc_id"] = out["dest_loc_id"].astype(str)
-    out["qty"] = pd.to_numeric(out["qty"], errors="coerce").fillna(0).clip(lower=0).astype(int)
-    out["need_by_ts_utc"] = pd.to_datetime(out["need_by_ts_utc"], utc=True, errors="coerce")
-    return out.dropna(subset=["need_by_ts_utc"])
+
+    # qty: default = 1 if column absent
+    if qty is not None:
+        out["qty"] = pd.to_numeric(df[qty], errors="coerce").fillna(1).clip(lower=1).astype(int)
+    else:
+        out["qty"] = 1
+
+    # need-by: default = now + 24h if column absent
+    if due is not None:
+        out["need_by_ts_utc"] = pd.to_datetime(df[due], utc=True, errors="coerce")
+        # any NaT -> default 24h
+        mask = out["need_by_ts_utc"].isna()
+        if mask.any():
+            out.loc[mask, "need_by_ts_utc"] = pd.Timestamp.utcnow().tz_localize("UTC") + pd.Timedelta(hours=24)
+    else:
+        out["need_by_ts_utc"] = pd.Timestamp.utcnow().tz_localize("UTC") + pd.Timedelta(hours=24)
+
+    return out
 
 # ---------- plant material (lead time) ----------
 def load_plant_material(path: str) -> pd.DataFrame:

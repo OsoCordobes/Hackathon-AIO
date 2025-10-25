@@ -1,3 +1,4 @@
+# src/planner.py
 from __future__ import annotations
 import math
 from typing import Dict, Tuple, Optional, List
@@ -56,8 +57,7 @@ def affected_orders_if_missing(
     """
     df = orders[orders["sku"] == sku].copy()
     if horizon_days is not None:
-        now = pd.Timestamp.utcnow().tz_localize("UTC")
-        end = now + pd.Timedelta(days=horizon_days)
+        now = pd.Timestamp.now(tz="UTC")        end = now + pd.Timedelta(days=horizon_days)
         df = df[(df["need_by_ts_utc"] >= now) & (df["need_by_ts_utc"] <= end)]
     return df.sort_values("need_by_ts_utc")
 
@@ -79,8 +79,7 @@ def _best_source_for_line(
     Returns (source_loc_id, ETA_ts (UTC POSIX hours from now), strategy_text).
     If none feasible, returns (None, inf, reason).
     """
-    now = pd.Timestamp.utcnow().tz_localize("UTC")
-
+    now = pd.Timestamp.now(tz="UTC")
     candidates: List[Tuple[str, float, str]] = []
 
     # Iterate all plants known (index of plants)
@@ -153,8 +152,7 @@ def plan_recovery(
     # qty_unavailable kept for UI, but planning is per order-line qty
 
     # --- Find impacted orders for this SKU (>= now)
-    now = pd.Timestamp.utcnow().tz_localize("UTC")
-    impacted = orders[(orders["sku"] == sku) & (orders["need_by_ts_utc"] >= now)].copy()
+    now = pd.Timestamp.now(tz="UTC")    impacted = orders[(orders["sku"] == sku) & (orders["need_by_ts_utc"] >= now)].copy()
     impacted.sort_values("need_by_ts_utc", inplace=True)
 
     if impacted.empty:
