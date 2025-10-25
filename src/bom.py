@@ -1,18 +1,28 @@
 import pandas as pd
 
-def load_bom(material_component_path="data/material_component.csv",
-             alt_small_path="data/material_component_small.csv"):
+_COMPONENT_CANDS = ["component","component_id","componentcode","comp","comp_id","child","child_id","child_material","child_item","subcomponent"]
+_MATERIAL_CANDS  = ["material","material_id","product","product_id","fg","finished_good","parent","parent_id","header_material","header_item"]
+
+def _pick(lower_map, cands):
+    for k in cands:
+        if k in lower_map: return lower_map[k]
+    return None
+
+def load_bom(path="data/material_component.csv", alt="data/material_component_small.csv"):
     try:
-        bom = pd.read_csv(material_component_path)
+        bom = pd.read_csv(path)
     except Exception:
-        bom = pd.read_csv(alt_small_path)
-    # normalize expected column names
+        bom = pd.read_csv(alt)
+    bom.columns = [c.strip() for c in bom.columns]
     lower = {c.lower(): c for c in bom.columns}
-    comp = next((c for c in bom.columns if "component" in c.lower()), None)
-    mat  = next((c for c in bom.columns if "material"  in c.lower() or "product" in c.lower()), None)
+    comp = _pick(lower, _COMPONENT_CANDS)
+    mat  = _pick(lower, _MATERIAL_CANDS)
     if not comp or not mat:
-        raise ValueError("BOM file needs columns for component and material/product")
-    return bom.rename(columns={comp:"component", mat:"material"})
+        raise ValueError(f"BOM missing component/material columns. Columns: {list(bom.columns)}")
+    out = bom.rename(columns={comp:"component", mat:"material"})[["component","material"]].copy()
+    out["component"] = out["component"].astype(str)
+    out["material"]  = out["material"].astype(str)
+    return out.dropna().drop_duplicates()
 
 def products_using(component_code: str, bom_df: pd.DataFrame):
-    return sorted(bom_df.loc[bom_df["component"] == component_code, "material"].astype(str).unique().tolist())
+    return sorted(bom_df.loc[bom_df["component"] == str(component_code), "material"].astype(str).unique().tolist())

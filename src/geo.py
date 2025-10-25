@@ -1,13 +1,8 @@
-import numpy as np
-from .contracts import SPEED_KMH
-
+import math
 def haversine_km(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    to_rad = np.pi / 180.0
-    dlat = (lat2 - lat1) * to_rad
-    dlon = (lon2 - lon1) * to_rad
-    a = np.sin(dlat/2)**2 + np.cos(lat1*to_rad)*np.cos(lat2*to_rad)*np.sin(dlon/2)**2
-    return 2 * R * np.arcsin(np.sqrt(a))
-
-def transit_hours(km: float) -> float:
-    return km / SPEED_KMH
+    if any(v is None for v in [lat1,lon1,lat2,lon2]): return None
+    R=6371.0
+    phi1,phi2=math.radians(lat1),math.radians(lat2)
+    dphi=math.radians(lat2-lat1); dl=math.radians(lon2-lon1)
+    a=math.sin(dphi/2)**2+math.cos(phi1)*math.cos(phi2)*math.sin(dl/2)**2
+    return 2*R*math.asin(math.sqrt(a))

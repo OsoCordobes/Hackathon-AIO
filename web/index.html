@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Jarvis — Danfoss Assistant</title>
+    <meta name="color-scheme" content="dark" />
+    <style>
+      :root {
+        --bg: #0a0a0a;
+        --ink: #eef0f2;
+        --muted: #9aa0aa;
+        --brand: #e40421;
+        --stroke: #1e2024;
+        --orbSize: clamp(130px, 15vw, 240px); /* slightly smaller */
+        --laneFs: clamp(40px, 5.6vw, 70px);
+        --gap: clamp(12px, 2.2vw, 24px);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        color: var(--ink);
+        font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, Segoe UI, Inter,
+          Roboto, Arial;
+        background: radial-gradient(
+            1200px 640px at 18% -8%,
+            rgba(228, 4, 33, 0.1),
+            transparent 60%
+          ),
+          radial-gradient(
+            1400px 720px at 118% 10%,
+            rgba(112, 0, 12, 0.12),
+            transparent 60%
+          ),
+          radial-gradient(
+            1000px 520px at 50% 118%,
+            rgba(255, 255, 255, 0.07),
+            transparent 65%
+          ),
+          var(--bg);
+        overflow: hidden;
+      }
+
+      /* faint brand watermark */
+      .mark {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        display: grid;
+        place-items: center;
+        filter: blur(12px) opacity(0.05);
+      }
+      .mark span {
+        font-weight: 900;
+        font-size: min(15rem, 22vw);
+        letter-spacing: 0.02em;
+        color: #c20f23;
+        user-select: none;
+      }
+
+      .viewport {
+        position: relative;
+        z-index: 1;
+        width: 100vw;
+        height: 100vh;
+        display: grid;
+        place-items: center;
+      }
+
+      /* hero group kept perfectly centered */
+      .group {
+        display: grid;
+        grid-auto-flow: column;
+        align-items: center;
+        column-gap: var(--gap);
+        transform: translateZ(0);
+      }
+
+      /* orb + title as one unit so title sits above orb */
+      .orbUnit {
+        position: relative;
+        width: var(--orbSize);
+        display: grid;
+        place-items: center;
+      }
+      .label {
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(100% + 18px);
+        font-weight: 900;
+        font-size: clamp(28px, 4.8vw, 78px);
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        background: linear-gradient(180deg, #ffffff, #d9dee2);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        text-shadow: 0 10px 28px rgba(228, 4, 33, 0.18);
+        transition: opacity 0.5s ease, transform 0.5s ease;
+      }
+      .label::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: -10px;
+        width: 48%;
+        height: 2px;
+        border-radius: 2px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(228, 4, 33, 0.9),
+          transparent
+        );
+        opacity: 0.85;
+      }
+      .label.hide {
+        opacity: 0;
+        transform: translateX(-50%) translateY(-8px);
+      }
+
+      /* orb canvases */
+      .orbWrap {
+        width: var(--orbSize);
+        height: var(--orbSize);
+        position: relative;
+        perspective: 800px;
+      }
+      canvas#orb,
+      canvas#sparks {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        border-radius: 50%;
+      }
+      canvas#orb {
+        filter: drop-shadow(0 32px 88px rgba(228, 4, 33, 0.42))
+          drop-shadow(0 12px 26px rgba(228, 4, 33, 0.26));
+        transition: filter 0.25s ease;
+      }
+      .orbWrap:hover #orb {
+        filter: drop-shadow(0 40px 120px rgba(228, 4, 33, 0.55))
+          drop-shadow(0 16px 36px rgba(228, 4, 33, 0.35));
+      }
+
+      /* typed departments on the right; hero still centered */
+      .typed {
+        font-size: var(--laneFs);
+        font-weight: 800;
+        letter-spacing: 0.2px;
+        line-height: 1.05;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        opacity: 0;
+        transform: translateX(calc(-50% + 0.3em)) scale(0.97);
+        transition: transform 0.95s cubic-bezier(0.22, 1, 0.36, 1),
+          opacity 0.6s ease;
+        will-change: transform, opacity;
+      }
+      .stage-2 .typed {
+        opacity: 1;
+        transform: translateX(0.3em) scale(1);
+      }
+
+      .row {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      #typed {
+        white-space: nowrap;
+      }
+      .caret {
+        width: 2px;
+        height: 1em;
+        background: var(--ink);
+        display: inline-block;
+        animation: blink 1s steps(1, end) infinite;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      .badge {
+        margin-top: 10px;
+        font-size: 0.28em;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--muted);
+        min-height: 1em;
+      }
+      .badge.new {
+        color: var(--brand);
+      }
+
+      /* floor */
+      .floor {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: min(56vw, 780px);
+        height: 56px;
+        border-radius: 50%;
+        transform: translate(-50%, calc(var(--orbSize) / 2 + 62px));
+        background: radial-gradient(
+          closest-side,
+          rgba(0, 0, 0, 0.5),
+          rgba(0, 0, 0, 0)
+        );
+        filter: blur(22px);
+        opacity: 0.4;
+      }
+
+      /* input bar */
+      .bar {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, calc(var(--orbSize) / 2 + 130px));
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.45s ease, transform 0.45s ease;
+        width: min(880px, 92vw);
+        padding: 0 8px;
+      }
+      .bar.show {
+        opacity: 1;
+        visibility: visible;
+      }
+      .input {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 20px 22px;
+        border-radius: 16px;
+        background: #0f1114;
+        border: 1px solid var(--stroke);
+        box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5),
+          inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+      }
+      .input input {
+        flex: 1;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--ink);
+        font: 16px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, Inter,
+          Roboto, Arial;
+      }
+      .input button {
+        border: 0;
+        outline: 0;
+        background: var(--brand);
+        color: #fff;
+        padding: 11px 16px;
+        border-radius: 12px;
+        font-weight: 700;
+        cursor: pointer;
+        transition: filter 0.2s ease, transform 0.06s ease;
+      }
+      .input button:hover {
+        filter: brightness(1.05);
+      }
+      .input button:active {
+        transform: translateY(1px);
+      }
+      .reply {
+        margin-top: 14px;
+        padding: 12px 14px;
+        border-radius: 12px;
+        background: #0f1114;
+        border: 1px solid var(--stroke);
+        white-space: pre-wrap;
+      }
+
+      /* focus transition */
+      .focus .group,
+      .focus .floor {
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.28s ease;
+      }
+      .focus .label {
+        opacity: 0;
+      }
+      .focus .bar {
+        transform: translate(-50%, -50%);
+        opacity: 1;
+        visibility: visible;
+      }
+      .focus .mark {
+        filter: blur(14px) opacity(0.03);
+      }
+
+      @media (max-width: 860px) {
+        .badge {
+          font-size: 0.34em;
+        }
+        .group {
+          grid-auto-flow: row;
+          row-gap: 20px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .typed,
+        .label,
+        .bar,
+        .group,
+        .floor {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="mark" aria-hidden="true"><span>Danfoss</span></div>
+
+    <section id="viewport" class="viewport" aria-label="Jarvis hero">
+      <div class="group" id="group">
+        <!-- title above orb -->
+        <div class="orbUnit">
+          <div id="label" class="label" aria-hidden="true">JARVIS</div>
+          <div class="orbWrap" id="orbWrap" aria-label="Jarvis orb">
+            <canvas id="orb"></canvas>
+            <canvas id="sparks"></canvas>
+          </div>
+        </div>
+
+        <!-- rotating departments -->
+        <div class="typed" id="typedBlock">
+          <div class="row">
+            <span id="typed">Supply Chain</span>
+            <span class="caret" aria-hidden="true"></span>
+          </div>
+          <div id="badge" class="badge"></div>
+        </div>
+      </div>
+
+      <div class="floor" aria-hidden="true"></div>
+
+      <!-- input -->
+      <div class="bar" id="bar">
+        <div class="input">
+          <input
+            id="q"
+            placeholder="Describe the situation… e.g. “product_1631005 is missing”"
+            autocomplete="off"
+          />
+          <button id="send" aria-label="Send">Send</button>
+        </div>
+        <div id="out" class="reply" style="display: none"></div>
+      </div>
+    </section>
+
+    <script>
+      /* staging */
+      const root = document.getElementById("viewport");
+      const label = document.getElementById("label");
+      const bar = document.getElementById("bar");
+      setTimeout(() => {
+        root.classList.add("stage-2");
+        label.classList.add("hide");
+        setTimeout(startTypeSequence, 140);
+      }, 2400);
+
+      /* departments typing */
+      const seq = [
+        { text: "Supply Chain", hold: 1900, badge: "NEW RELEASE", type: "new" },
+        { text: "Planning", hold: 900, badge: "coming soon", type: "soon" },
+        { text: "Logistics", hold: 900, badge: "coming soon", type: "soon" },
+        { text: "Procurement", hold: 900, badge: "coming soon", type: "soon" },
+        { text: "Quality", hold: 900, badge: "coming soon", type: "soon" },
+        {
+          text: "Manufacturing",
+          hold: 900,
+          badge: "coming soon",
+          type: "soon",
+        },
+      ];
+      const typedEl = document.getElementById("typed");
+      const badgeEl = document.getElementById("badge");
+      let firstLoopDone = false,
+        stopTyping = false;
+
+      async function typeWord(w, s = 28) {
+        typedEl.textContent = "";
+        for (let i = 0; i < w.length && !stopTyping; i++) {
+          typedEl.textContent += w[i];
+          await new Promise((r) => setTimeout(r, s));
+        }
+      }
+      async function eraseWord(s = 14) {
+        const t = typedEl.textContent;
+        for (let i = t.length; i > 0 && !stopTyping; i--) {
+          typedEl.textContent = t.slice(0, i - 1);
+          await new Promise((r) => setTimeout(r, s));
+        }
+      }
+      async function startTypeSequence() {
+        if (stopTyping) return;
+        while (true) {
+          for (const it of seq) {
+            if (stopTyping) return;
+            badgeEl.className = "badge " + (it.type === "new" ? "new" : "");
+            badgeEl.textContent = it.badge || "";
+            await typeWord(it.text);
+            await new Promise((r) => setTimeout(r, it.hold));
+            await eraseWord();
+          }
+          if (!firstLoopDone) {
+            firstLoopDone = true;
+            bar.classList.add("show");
+          }
+        }
+      }
+
+      /* focus transition to chat */
+      const qEl = document.getElementById("q");
+      const send = document.getElementById("send");
+      const outEl = document.getElementById("out");
+      function enterFocus() {
+        document.body.classList.add("focus");
+        stopTyping = true;
+      }
+      function exitFocus() {
+        document.body.classList.remove("focus");
+        stopTyping = false;
+        if (!typedEl.textContent) startTypeSequence();
+      }
+      qEl.addEventListener("focus", enterFocus);
+      qEl.addEventListener("blur", () => {
+        if (!qEl.value.trim()) setTimeout(exitFocus, 60);
+      });
+
+      async function sendMsg() {
+        const msg = qEl.value.trim();
+        if (!msg) return;
+        send.disabled = true;
+        outEl.style.display = "block";
+        outEl.textContent = "Preparing a plan…";
+        try {
+          const res = await fetch("/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: msg }),
+          });
+          const data = await res.json();
+          outEl.textContent = data.reply || "No reply.";
+        } catch {
+          outEl.textContent = "Error contacting the planner.";
+        } finally {
+          send.disabled = false;
+        }
+      }
+      send.addEventListener("click", sendMsg);
+      qEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          sendMsg();
+        }
+      });
+
+      /* WebGL: glass-energy orb with plasma ring + fresnel rim */
+      (function () {
+        const canvas = document.getElementById("orb");
+        const gl = canvas.getContext("webgl", {
+          antialias: true,
+          premultipliedAlpha: false,
+        });
+        if (!gl) return;
+
+        const DPR = window.devicePixelRatio || 1;
+        function resize() {
+          const r = canvas.getBoundingClientRect();
+          const w = Math.max(1, Math.floor(r.width * DPR));
+          const h = Math.max(1, Math.floor(r.height * DPR));
+          if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+            gl.viewport(0, 0, w, h);
+          }
+        }
+        new ResizeObserver(resize).observe(canvas);
+        resize();
+
+        const vs = `attribute vec2 a; varying vec2 v; void main(){ v=a*0.5+0.5; gl_Position=vec4(a,0.0,1.0); }`;
+
+        const fs = `
+    precision highp float;
+    varying vec2 v;
+    uniform vec2 R; uniform float T; uniform vec2 M; uniform float H; // hover boost
+
+    float hash(float n){ return fract(sin(n)*43758.5453123); }
+    float n3(vec3 x){ vec3 p=floor(x), f=fract(x); f=f*f*(3.-2.*f); float n=p.x+p.y*57.+113.*p.z;
+      return mix(mix(mix(hash(n+0.0),hash(n+1.0),f.x),mix(hash(n+57.0),hash(n+58.0),f.x),f.y),
+                 mix(mix(hash(n+113.0),hash(n+114.0),f.x),mix(hash(n+170.0),hash(n+171.0),f.x),f.y),f.z); }
+    float fbm(vec3 p){ float a=.5,r=0.; for(int i=0;i<6;i++){ r+=a*n3(p); p*=2.02; a*=.53; } return r; }
+    float sdS(vec3 p,float r){ return length(p)-r; }
+    float map(vec3 p, out float rad){ float wob=.10*fbm(p*2.4+vec3(0.,0.,T*.35)); rad=1.0+wob; return sdS(p,rad); }
+    vec3 norm(vec3 p){ float e=.0015,r; vec2 h=vec2(1.,-1.)*e;
+      return normalize(h.xyy*map(p+h.xyy,r)+h.yyx*map(p+h.yyx,r)+h.yxy*map(p+h.yxy,r)+h.xxx*map(p+h.xxx,r)); }
+    vec3 env(vec3 d){ float u=clamp(d.y*0.5+0.5,0.,1.); vec3 top=vec3(0.08,0.10,0.18), bot=vec3(0.16,0.02,0.05); return mix(bot,top,u); }
+    vec3 rimColor(float f){ vec3 cR=vec3(1.0,0.20,0.30), cB=vec3(0.35,0.65,1.0); return mix(cR,cB,smoothstep(0.0,1.0,f)); }
+
+    void main(){
+      vec2 uv=(v*2.-1.); uv.x*=R.x/R.y;
+
+      vec2 m=(M/R-.5)*2.;
+      float ay=m.x*.45+.22*sin(T*.27);
+      float ax=m.y*.35+.18*cos(T*.23);
+      vec3 ro=vec3(2.15*sin(ay)*cos(ax),2.15*sin(ax),2.15*cos(ay)*cos(ax)), ta=vec3(0.);
+      vec3 ww=normalize(ta-ro), uu=normalize(cross(ww,vec3(0.,1.,0.))), vv=cross(uu,ww);
+      vec3 rd=normalize(uv.x*uu+uv.y*vv+1.9*ww);
+
+      float t=0., d, rad, glow=0.; bool hit=false;
+      for(int i=0;i<140;i++){
+        vec3 p=ro+rd*t; d=map(p,rad);
+        glow+=.012/(.03+abs(d));
+        if(d<.0014){hit=true;break;}
+        t+=d*.88; if(t>7.) break;
+      }
+
+      vec3 col=vec3(0.0);
+      if(hit){
+        vec3 p=ro+rd*t, n=norm(p);
+        float F=pow(1.0-max(dot(n,-rd),0.0),5.0);
+        vec3 refl=env(reflect(rd,n));
+        vec3 L1=normalize(vec3(.6,.8,.5)); vec3 Hn=normalize(L1-rd);
+        float spec=pow(max(dot(n,Hn),0.0),80.0);
+
+        vec3 ps=normalize(p); float theta=acos(ps.y);
+        float band=exp(-pow((theta-1.57)*2.2,2.));
+        float swirl=fbm(ps*6.0+vec3(0.,0.,T*1.6));
+        float fil=smoothstep(0.68,0.86,swirl)*band;
+        vec3 plasma=mix(vec3(0.95,0.25,0.32), vec3(0.45,0.85,1.0), 0.55+0.45*sin(T*0.7+ps.x*6.0));
+        plasma*=(0.35+0.65*fil);
+
+        vec3 shell=mix(vec3(0.55,0.06,0.12), vec3(0.95,0.18,0.26), 0.65);
+        vec3 rim=rimColor(F)*(0.35+0.65*F);
+
+        col=shell+0.45*refl+0.25*spec;
+        col=mix(col,plasma,0.55*band);
+        col+=rim;
+      } else {
+        float g=smoothstep(1.15,0.1,length(uv));
+        col=mix(vec3(0.02),vec3(0.08),g);
+      }
+
+      // hover boost on glow
+      col += vec3(1.0,0.18,0.26)*glow*(0.035*H);
+      col = pow(col, vec3(0.9));
+      gl_FragColor=vec4(col,1.0);
+    }`;
+
+        function sh(t, s) {
+          const x = gl.createShader(t);
+          gl.shaderSource(x, s);
+          gl.compileShader(x);
+          if (!gl.getShaderParameter(x, gl.COMPILE_STATUS))
+            console.error(gl.getShaderInfoLog(x));
+          return x;
+        }
+        const prog = gl.createProgram();
+        gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+        gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+          console.error(gl.getProgramInfoLog(prog));
+        gl.useProgram(prog);
+
+        const buf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(
+          gl.ARRAY_BUFFER,
+          new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+          gl.STATIC_DRAW
+        );
+        const loc = gl.getAttribLocation(prog, "a");
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+        const uT = gl.getUniformLocation(prog, "T");
+        const uR = gl.getUniformLocation(prog, "R");
+        const uM = gl.getUniformLocation(prog, "M");
+        const uH = gl.getUniformLocation(prog, "H");
+
+        let start = performance.now(),
+          mouse = [0, 0],
+          hover = 1.0;
+        const wrap = document.getElementById("orbWrap");
+        wrap.addEventListener("mouseenter", () => {
+          hover = 1.45;
+        });
+        wrap.addEventListener("mouseleave", () => {
+          hover = 1.0;
+        });
+        canvas.addEventListener(
+          "mousemove",
+          (e) => {
+            const r = canvas.getBoundingClientRect(),
+              d = window.devicePixelRatio || 1;
+            mouse = [
+              (e.clientX - r.left) * d,
+              (r.height - (e.clientY - r.top)) * d,
+            ];
+          },
+          { passive: true }
+        );
+
+        function frame(now) {
+          const r = canvas.getBoundingClientRect(),
+            d = window.devicePixelRatio || 1;
+          if (canvas.width !== r.width * d || canvas.height !== r.height * d) {
+            canvas.width = r.width * d;
+            canvas.height = r.height * d;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+          }
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.uniform1f(uT, (now - start) / 1000);
+          gl.uniform2f(uR, canvas.width, canvas.height);
+          gl.uniform2f(uM, mouse[0], mouse[1]);
+          gl.uniform1f(uH, hover);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      })();
+
+      /* micro-particles orbiting the orb */
+      (function () {
+        const cv = document.getElementById("sparks");
+        const ctx = cv.getContext("2d");
+        const DPR = window.devicePixelRatio || 1;
+
+        function resize() {
+          const r = cv.getBoundingClientRect();
+          cv.width = Math.max(1, Math.floor(r.width * DPR));
+          cv.height = Math.max(1, Math.floor(r.height * DPR));
+        }
+        new ResizeObserver(resize).observe(cv);
+        resize();
+
+        const N = 36;
+        const parts = [...Array(N)].map((_, i) => ({
+          a: Math.random() * Math.PI * 2,
+          r: 0.56 + Math.random() * 0.07,
+          s: (0.4 + Math.random() * 0.9) * (Math.random() < 0.5 ? -1 : 1),
+          alpha: 0.15 + 0.35 * Math.random(),
+          size: 1.2 + Math.random() * 1.6,
+        }));
+
+        function tick(t) {
+          const w = cv.width,
+            h = cv.height,
+            cx = w / 2,
+            cy = h / 2,
+            rad = Math.min(w, h) / 2;
+          ctx.clearRect(0, 0, w, h);
+          ctx.globalCompositeOperation = "lighter";
+          for (const p of parts) {
+            p.a += p.s * 0.0028;
+            const x = cx + Math.cos(p.a) * rad * p.r;
+            const y = cy + Math.sin(p.a) * rad * p.r;
+            const grd = ctx.createRadialGradient(x, y, 0, x, y, 8 * DPR);
+            grd.addColorStop(0, `rgba(255,80,110,${p.alpha})`);
+            grd.addColorStop(1, "rgba(255,80,110,0)");
+            ctx.fillStyle = grd;
+            ctx.beginPath();
+            ctx.arc(x, y, p.size * DPR, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      })();
+    </script>
+  </body>
+</html>
