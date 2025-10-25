@@ -1,220 +1,122 @@
 # src/agent.py
-# Deterministic router with human-readable output (local time, clean bullets).
-
-import re, json
-from typing import Dict, Any, List
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-from langchain_openai import ChatOpenAI  # fallback only
+import os, re, json
+from typing import Any, Dict
 from src.agent_tools import (
     recommend_action_missing_sku,
-    impacted_orders_by_sku,
     impacted_orders_by_component,
-    simulate_component_stockout,
     reroute_block,
     predict_coverage,
+    handle_plant_down,
 )
 
-# ---------- formatting helpers ----------
-LOCAL_TZ = ZoneInfo("Europe/Copenhagen")
+# ---------- IO coercion ----------
+def _to_text(x) -> str:
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        for k in ("text", "message", "query", "input", "prompt"):
+            v = x.get(k)
+            if isinstance(v, str):
+                return v
+        return " ".join(str(v) for v in x.values())
+    return str(x)
 
-def _loads(s: str):
-    try: return json.loads(s)
-    except Exception: return s
-
-def _to_dt(x):
-    if x is None: return None
-    if isinstance(x, datetime): return x.astimezone(LOCAL_TZ)
-    sx = str(x)
+# ---------- optional LLM ----------
+USE_LLM = bool(os.getenv("OPENAI_API_KEY"))
+LLM = None
+if USE_LLM:
     try:
-        # handle pandas/ISO strings
-        dt = datetime.fromisoformat(sx.replace("Z", "+00:00"))
-        return dt.astimezone(LOCAL_TZ) if dt.tzinfo else dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(LOCAL_TZ)
+        from langchain_openai import ChatOpenAI
+        LLM = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), temperature=0.2)
     except Exception:
-        return None
+        USE_LLM = False
 
-def _fmt_ts(x):
-    dt = _to_dt(x)
-    return dt.strftime("%d %b %Y, %H:%M %Z") if dt else "n/a"
+SYSTEM_PROMPT = (
+    "You are a supply-chain assistant. Detect intent (missing_sku, missing_component, "
+    "reroute, coverage, unknown). Extract sku/component and quantity. "
+    "Return ONLY JSON: {\"intent\":..., \"sku\":..., \"component\":..., \"quantity\":...}"
+)
 
-def _fmt_pct(x):
+# ---------- parsers ----------
+def _regex_parse(x: Any) -> Dict[str, Any]:
+    t = _to_text(x).strip()
+    sku = None; comp = None; qty = None
+    m = re.search(r"(?:product|sku)_[A-Za-z0-9\-]+", t, re.I)
+    if m: sku = m.group(0)
+    m = re.search(r"(?:component|cmp)_[A-Za-z0-9\-]+", t, re.I)
+    if m: comp = m.group(0)
+    m = re.search(r"(\d+)\s*(units|pcs|qty)?", t, re.I)
+    if m:
+        try: qty = int(m.group(1))
+        except: qty = None
+    intent = "unknown"
+    low = t.lower()
+    if any(k in low for k in ["missing", "stockout", "unavailable"]):
+        intent = "missing_component" if comp and not sku else "missing_sku"
+    elif "reroute" in low: intent = "reroute"
+    elif "coverage" in low or "how long" in low: intent = "coverage"
+    return {"intent": intent, "sku": sku, "component": comp, "quantity": qty}
+
+def _llm_parse(x: Any) -> Dict[str, Any]:
+    if not USE_LLM or LLM is None:
+        return _regex_parse(x)
     try:
-        return f"{float(x):.1f}%"
+        text = _to_text(x)
+        out = LLM.invoke([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ]).content
+        j = re.search(r"\{.*\}", out, re.S)
+        return json.loads(j.group(0)) if j else _regex_parse(text)
     except Exception:
-        return "?"
+        return _regex_parse(x)
 
-def _fmt_late(h):
-    try:
-        h = float(h)
-    except Exception:
-        return ""
-    return "on time" if h <= 1e-6 else f"late by {h:.1f} h"
+def _parse(x: Any) -> Dict[str, Any]:
+    return _llm_parse(x)
 
-def _line(r: Dict[str, Any]) -> str:
-    oid = r.get("order_id", "?")
-    cust = r.get("customer_id", "?")
-    dst = r.get("dest_loc_id", "?")
-    src = r.get("source_loc_id") or "n/a"
-    strat = (r.get("strategy") or "").replace("-", " ")
-    eta = _fmt_ts(r.get("ETA_ts"))
-    late = _fmt_late(r.get("lateness_h"))
-    return f"- Order {oid} → {dst} (customer {cust}). Source {src}. {strat}. ETA {eta}. {late}."
+# ---------- agent ----------
+class SmartAgent:
+    def _wrap(self, text: str, suggestions=None) -> dict:
+        return {"text": text, "suggestions": suggestions or []}
 
-def _fmt_rows(rows: List[Dict[str, Any]], limit: int = 5) -> str:
-    if not rows: return "none."
-    take = rows[:limit]
-    out = "\n".join(_line(r) for r in take)
-    more = "" if len(rows) <= limit else f"\n… and {len(rows)-limit} more."
-    return out + more
+    def invoke(self, payload: Any) -> dict:
+        p = _parse(payload)
+        intent = p.get("intent", "unknown")
+        sku = p.get("sku")
+        comp = p.get("component")
+        qty = p.get("quantity") or 50
 
-# ---------- intent parsing ----------
-SKU_RE = r"(product_\d+)"
-PLANT_RE = r"(plant_\d+)"
+        # detect plant outage phrasing
+        msg = _to_text(payload).strip()
+        mplant = re.search(r"(?:plant|site|wh)_[A-Za-z0-9\-]+", msg, re.I)
+        plant_id = mplant.group(0) if mplant else None
+        if plant_id and any(k in msg.lower() for k in ["down","not working","outage","offline","closed"]):
+            return handle_plant_down(plant_id)
 
-KW_MISSING = r"(missing|out of stock|delay|late|shortage|falta|agotad|retras|sin stock)"
-KW_COMPONENT = r"(component|componente)"
-KW_ROUTE = r"(route|ruta)"
-KW_BLOCKED = r"(blocked|bloquead|closed|cerrad)"
-KW_COVERAGE = r"(coverage|stockout[s]?|predict|horizon|riesgo|alerta)"
+        if intent == "missing_sku" and sku:
+            return self._wrap(
+                recommend_action_missing_sku(f"{sku} is missing"),
+                [f"Try alternative plant for {sku}", f"Export plan for {sku}"],
+            )
 
-def _parse(text: str) -> Dict[str, Any]:
-    t = text.strip().lower()
-    msku = re.findall(SKU_RE, t)
-    mplant = re.findall(PLANT_RE, t)
-    out: Dict[str, Any] = {"raw": text}
+        if intent == "missing_component" and comp:
+            n = len(impacted_orders_by_component(comp))
+            return self._wrap(
+                f"Component {comp} shortage detected. {n} impacted order(s) estimated. Provide parent SKU to plan recovery.",
+                [f"Plan recovery for parent of {comp}", f"Show orders using {comp}"],
+            )
 
-    if re.search(KW_ROUTE, t) and re.search(KW_BLOCKED, t):
-        out["type"] = "route_block"
-        out["origin"] = mplant[0] if len(mplant) >= 1 else None
-        out["dest"] = mplant[1] if len(mplant) >= 2 else None
-        out["sku"] = msku[0] if msku else ""
-        return out
+        if intent == "reroute":
+            return self._wrap(str(reroute_block(payload)))
 
-    if re.search(KW_COMPONENT, t) and re.search(KW_MISSING, t) and msku:
-        out["type"] = "component_missing"
-        out["code"] = msku[0]
-        return out
+        if intent == "coverage":
+            return self._wrap(str(predict_coverage(payload)))
 
-    if re.search(KW_COMPONENT, t) and ("stockout" in t or "simulate" in t or "simular" in t or "falt" in t) and msku:
-        out["type"] = "component_stockout"
-        out["code"] = msku[0]
-        return out
-
-    if re.search(KW_MISSING, t) and msku:
-        out["type"] = "sku_missing"
-        out["sku"] = msku[0]
-        return out
-
-    if ("who is affected" in t or "clientes" in t or "affected" in t) and msku:
-        out["type"] = "impacted_by_sku"
-        out["sku"] = msku[0]
-        return out
-
-    if re.search(KW_COVERAGE, t):
-        n = re.findall(r"(\d+)\s*(day|día|dias|días)?", t)
-        horizon = int(n[0][0]) if n else 7
-        out["type"] = "coverage"
-        out["horizon"] = max(1, min(60, horizon))
-        return out
-
-    out["type"] = "fallback"
-    return out
-
-# ---------- handlers ----------
-def _handle_sku_missing(sku: str) -> str:
-    res = _loads(recommend_action_missing_sku(sku))
-    if isinstance(res, dict):
-        top = res.get("recommended_action") or "No feasible plan. Inform customers of delay."
-        # beautify any ETA inside the top string if present
-        top = top.replace("ETA ", "ETA ").replace("+00:00", "")
-        kpi = res.get("kpi", {})
-        rows = res.get("per_order", [])
-        k1 = _fmt_pct(kpi.get("on_time_pct"))
-        k2 = _fmt_pct(kpi.get("on_time_orders_pct"))
-        # try to rewrite ETA in top with local time if present as ISO
-        for token in re.findall(r"\d{4}-\d{2}-\d{2}[^ ]+", top):
-            top = top.replace(token, _fmt_ts(token))
-        return (
-            f"Missing SKU: {sku}\n"
-            f"Recommended: {top}\n"
-            f"KPI lines on-time: {k1} · orders full-kit on-time: {k2}\n"
-            f"{_fmt_rows(rows)}"
+        # small talk fallback
+        return self._wrap(
+            f"I’m online. Example: 'product_556490 is missing' or 'plant_253 is not working'. You said: '{msg}'.",
+            ["product_556490 is missing", "plant_253 is not working"],
         )
-    return str(res)
 
-def _handle_impacted_by_sku(sku: str) -> str:
-    res = _loads(impacted_orders_by_sku(sku))
-    if isinstance(res, list):
-        return f"Impacted orders for {sku}: {len(res)}\n{_fmt_rows(res)}"
-    return str(res)
-
-def _handle_component_missing(code: str) -> str:
-    res = _loads(impacted_orders_by_component(code))
-    count = len(res) if isinstance(res, list) else 0
-    sim = _loads(simulate_component_stockout(code))
-    lines = sim if isinstance(sim, list) else []
-    return (
-        f"Component missing: {code}\n"
-        f"Affected finished-good orders: {count}\n"
-        f"{_fmt_rows(lines)}"
-    )
-
-def _handle_component_stockout(code: str) -> str:
-    res = _loads(simulate_component_stockout(code))
-    if isinstance(res, list):
-        return f"Stockout simulation for {code}: {len(res)} replanned lines\n{_fmt_rows(res)}"
-    return str(res)
-
-def _handle_route_block(origin: str, dest: str, sku: str) -> str:
-    if not origin or not dest:
-        return "Need origin and destination plants like plant_201 and plant_203."
-    res = _loads(reroute_block(origin, dest, sku))
-    if isinstance(res, dict):
-        rows = res.get("rows", [])
-        k = _fmt_pct(res.get("on_time_pct"))
-        return f"Route blocked {origin} → {dest}. On-time after reroute: {k}\n{_fmt_rows(rows)}"
-    return str(res)
-
-def _handle_coverage(h: int) -> str:
-    res = _loads(predict_coverage(h))
-    if isinstance(res, list):
-        rows = sorted(res, key=lambda r: r.get("risk", 0), reverse=True)[:10]
-        lines = [
-            f"- {r.get('sku','?')}: demand {r.get('demand_in_window','?')} vs on_hand {r.get('on_hand','?')} → risk {r.get('risk','?')}"
-            for r in rows
-        ]
-        return f"Coverage alerts next {h} days:\n" + "\n".join(lines)
-    return str(res)
-
-# ---------- public API ----------
-def build_agent(model: str = "gpt-4o-mini"):
-    llm = ChatOpenAI(model=model, temperature=0)  # fallback only
-
-    class RouterAgent:
-        def invoke(self, payload):
-            text = str(payload.get("input", "")).strip()
-            intent = _parse(text)
-
-            t = intent["type"]
-            if t == "sku_missing":
-                return {"output": _handle_sku_missing(intent["sku"])}
-            if t == "impacted_by_sku":
-                return {"output": _handle_impacted_by_sku(intent["sku"])}
-            if t == "component_missing":
-                return {"output": _handle_component_missing(intent["code"])}
-            if t == "component_stockout":
-                return {"output": _handle_component_stockout(intent["code"])}
-            if t == "route_block":
-                return {"output": _handle_route_block(intent.get("origin"), intent.get("dest"), intent.get("sku",""))}
-            if t == "coverage":
-                return {"output": _handle_coverage(intent["horizon"])}
-
-            # fallback for chit-chat
-            sys = ("You are Jarvis, a supply chain assistant. Keep answers short. "
-                   "When no valid SKU/plant intent is present, ask for exact codes.")
-            msg = [{"role":"system","content":sys},{"role":"user","content":text}]
-            out = llm.invoke(msg)
-            return {"output": out.content}
-
-    return RouterAgent()
+def build_agent():
+    return SmartAgent()
